@@ -10,7 +10,6 @@ import java.util.Map;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
-import com.fasterxml.jackson.databind.JsonNode;
 
 import com.github.copilot.CopilotExperimental;
 import com.github.copilot.generated.rpc.SessionLimitsConfig;
@@ -178,6 +177,9 @@ public final class ResumeSessionRequest {
     @JsonProperty("largeOutput")
     private LargeToolOutputConfig largeOutput;
 
+    @JsonProperty("toolSearch")
+    private ToolSearchConfig toolSearch;
+
     @JsonProperty("memory")
     private MemoryConfiguration memory;
 
@@ -212,7 +214,7 @@ public final class ResumeSessionRequest {
     private String remoteSession;
 
     @JsonProperty("expAssignments")
-    private JsonNode expAssignments;
+    private CopilotExpAssignmentResponse expAssignments;
 
     @JsonProperty("enableManagedSettings")
     @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -840,6 +842,16 @@ public final class ResumeSessionRequest {
         this.largeOutput = largeOutput;
     }
 
+    /** Gets tool-search config. @return the tool-search config */
+    public ToolSearchConfig getToolSearch() {
+        return toolSearch;
+    }
+
+    /** Sets tool-search config. @param toolSearch the tool-search config */
+    public void setToolSearch(ToolSearchConfig toolSearch) {
+        this.toolSearch = toolSearch;
+    }
+
     /** Gets memory config. @return the memory config */
     public MemoryConfiguration getMemory() {
         return memory;
@@ -975,14 +987,14 @@ public final class ResumeSessionRequest {
     }
 
     /** Gets the ExP assignment data. @return the ExP assignment data */
-    public JsonNode getExpAssignments() {
+    public CopilotExpAssignmentResponse getExpAssignments() {
         return expAssignments;
     }
 
     /**
      * Sets the ExP assignment data. @param expAssignments the ExP assignment data
      */
-    public void setExpAssignments(JsonNode expAssignments) {
+    public void setExpAssignments(CopilotExpAssignmentResponse expAssignments) {
         this.expAssignments = expAssignments;
     }
 

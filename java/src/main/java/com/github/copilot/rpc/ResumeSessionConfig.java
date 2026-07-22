@@ -13,7 +13,6 @@ import java.util.function.Consumer;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonIgnore;
-import com.fasterxml.jackson.databind.JsonNode;
 
 import com.github.copilot.CopilotExperimental;
 import com.github.copilot.generated.SessionEvent;
@@ -90,6 +89,7 @@ public class ResumeSessionConfig {
     private List<String> instructionDirectories;
     private List<String> pluginDirectories;
     private LargeToolOutputConfig largeOutput;
+    private ToolSearchConfig toolSearch;
     private MemoryConfiguration memory;
     private List<String> disabledSkills;
     private InfiniteSessionConfig infiniteSessions;
@@ -101,7 +101,7 @@ public class ResumeSessionConfig {
     private boolean enableMcpApps;
     private String gitHubToken;
     private String remoteSession;
-    private JsonNode expAssignments;
+    private CopilotExpAssignmentResponse expAssignments;
     private Boolean enableManagedSettings;
 
     /**
@@ -1448,6 +1448,27 @@ public class ResumeSessionConfig {
     }
 
     /**
+     * Gets the tool-search configuration.
+     *
+     * @return the tool-search config, or {@code null} for the runtime default
+     */
+    public ToolSearchConfig getToolSearch() {
+        return toolSearch;
+    }
+
+    /**
+     * Sets the tool-search configuration.
+     *
+     * @param toolSearch
+     *            the tool-search config
+     * @return this config for method chaining
+     */
+    public ResumeSessionConfig setToolSearch(ToolSearchConfig toolSearch) {
+        this.toolSearch = toolSearch;
+        return this;
+    }
+
+    /**
      * Gets the configuration for session memory.
      *
      * @return the memory config, or {@code null} for default
@@ -1727,21 +1748,22 @@ public class ResumeSessionConfig {
      *
      * @return the ExP assignment data, or {@code null} if not set
      */
-    public JsonNode getExpAssignments() {
+    public CopilotExpAssignmentResponse getExpAssignments() {
         return expAssignments;
     }
 
     /**
      * Sets ExP assignment ("flight") data injected by a trusted integrator.
      * <p>
-     * See {@link SessionConfig#setExpAssignments(JsonNode)} for details. The
-     * runtime supports injecting ExP assignments on resume as well as create.
+     * See {@link SessionConfig#setExpAssignments(CopilotExpAssignmentResponse)} for
+     * details. The runtime supports injecting ExP assignments on resume as well as
+     * create.
      *
      * @param expAssignments
-     *            the opaque ExP assignment data
+     *            the ExP assignment data
      * @return this config for method chaining
      */
-    public ResumeSessionConfig setExpAssignments(JsonNode expAssignments) {
+    public ResumeSessionConfig setExpAssignments(CopilotExpAssignmentResponse expAssignments) {
         this.expAssignments = expAssignments;
         return this;
     }
@@ -1837,6 +1859,7 @@ public class ResumeSessionConfig {
                 : null;
         copy.pluginDirectories = this.pluginDirectories != null ? new ArrayList<>(this.pluginDirectories) : null;
         copy.largeOutput = this.largeOutput;
+        copy.toolSearch = this.toolSearch;
         copy.memory = this.memory;
         copy.disabledSkills = this.disabledSkills != null ? new ArrayList<>(this.disabledSkills) : null;
         copy.infiniteSessions = this.infiniteSessions;

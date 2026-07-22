@@ -172,24 +172,59 @@ export async function createSdkTestContext({
           }
         : {};
 
-    const copilotClient = new CopilotClient({
-        // The in-process transport rejects a per-client workingDirectory (it would have to
-        // mutate the shared host process cwd). Instead the harness changes this process's
-        // cwd to workDir around the in-process worker's startup (see beforeEach below), so
-        // the worker still spawns with workDir as its cwd. Out-of-process clients get it
-        // as a normal per-client option.
-        workingDirectory: isInProcess ? undefined : workDir,
-        // In-process hosting mirrors the environment onto the real process (per test, in
-        // beforeEach below), so the worker inherits it; passing a per-client env here
-        // would have no effect.
-        env: isInProcess ? undefined : mergedEnv,
-        logLevel: logLevel || "error",
-        connection,
-        gitHubToken: authTokenToUse,
-        ...remainingClientOptions,
-    });
+    // Builds a CopilotClient wired for the active transport, so tests that need a
+    // secondary client (e.g. resuming a session from a fresh client) don't have to
+    // reimplement the in-process env/cwd handling. Callers may override the connection
+    // (e.g. pin stdio for telemetry, which the in-process transport cannot carry
+    // per-client); env is attached to child-process transports and mirrored onto the
+    // process for in-process (see beforeEach below), never passed per-client for the
+    // in-process transport where it would be rejected.
+    function createClient(overrides: Partial<CopilotClientOptions> = {}): CopilotClient {
+        const {
+            connection: overrideConnection,
+            env: _ignoredEnv,
+            workingDirectory: overrideWorkingDirectory,
+            ...rest
+        } = overrides;
 
-    const harness = { homeDir, workDir, openAiEndpoint, copilotClient, env };
+        let effectiveConnection = overrideConnection ?? connection;
+        // Fill in the bundled CLI path for child-process connections that omit it
+        // (e.g. a bare RuntimeConnection.forStdio() used to pin telemetry to stdio).
+        if (effectiveConnection.kind === "stdio" && effectiveConnection.path === undefined) {
+            effectiveConnection = RuntimeConnection.forStdio({
+                ...effectiveConnection,
+                path: cliPath,
+            });
+        } else if (effectiveConnection.kind === "tcp" && effectiveConnection.path === undefined) {
+            effectiveConnection = RuntimeConnection.forTcp({
+                ...effectiveConnection,
+                path: cliPath,
+            });
+        }
+        const effectiveInProcess = effectiveConnection.kind === "inprocess";
+
+        return new CopilotClient({
+            // The in-process transport rejects a per-client workingDirectory (it would have to
+            // mutate the shared host process cwd). Instead the harness changes this process's
+            // cwd to workDir around the in-process worker's startup (see beforeEach below), so
+            // the worker still spawns with workDir as its cwd. Out-of-process clients get it
+            // as a normal per-client option.
+            workingDirectory:
+                overrideWorkingDirectory ?? (effectiveInProcess ? undefined : workDir),
+            // In-process hosting mirrors the environment onto the real process (per test, in
+            // beforeEach below), so the worker inherits it; passing a per-client env here
+            // would have no effect (and is rejected by the in-process transport).
+            env: effectiveInProcess ? undefined : mergedEnv,
+            logLevel: logLevel || "error",
+            connection: effectiveConnection,
+            gitHubToken: authTokenToUse,
+            ...rest,
+        });
+    }
+
+    const copilotClient = createClient(remainingClientOptions);
+
+    const harness = { homeDir, workDir, openAiEndpoint, copilotClient, env, createClient };
 
     // Track if any test fails to avoid writing corrupted snapshots
     let anyTestFailed = false;
@@ -258,7 +293,15 @@ export async function createSdkTestContext({
     afterAll(async () => {
         await copilotClient.stop();
         await openAiEndpoint.stop(anyTestFailed);
-        await rmDir("remove e2e test copilotHomeDir", copilotHomeDir);
+        // On Windows, this Vitest worker can retain the in-process runtime's session.db
+        // lock until the worker exits. Retrying from its afterAll hook cannot succeed:
+        // the hook waits for the lock, while the lock cannot clear until the hook returns
+        // and lets the worker exit.
+        await rmDir(
+            "remove e2e test copilotHomeDir",
+            copilotHomeDir,
+            isInProcess && process.platform === "win32" ? 1 : 30
+        );
         await rmDir("remove e2e test homeDir", homeDir);
         await rmDir("remove e2e test workDir", workDir);
     });
@@ -285,14 +328,14 @@ function getTrafficCapturePath(testContext: TestContext): string {
     return join(SNAPSHOTS_DIR, testFileName, `${taskNameAsFilename}.yaml`);
 }
 
-async function rmDir(message: string, path: string): Promise<void> {
+async function rmDir(message: string, path: string, maxTries = 30): Promise<void> {
     // Use longer retries to tolerate Windows holding SQLite session-store.db
     // open briefly after the CLI subprocess exits. If the temp dir still can't
     // be removed (e.g. CLI background writer racing with cleanup), warn and
     // continue rather than failing the whole test run — the OS / CI runner
     // will reclaim the temp dir on shutdown.
     try {
-        await retry(message, () => rm(path, { recursive: true, force: true }), 30, 1000);
+        await retry(message, () => rm(path, { recursive: true, force: true }), maxTries, 1000);
     } catch (error) {
         console.warn(
             `WARN: ${message} failed; leaving temp dir for OS cleanup: ${formatError(error)}`

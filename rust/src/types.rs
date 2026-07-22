@@ -20,7 +20,7 @@ pub use crate::copilot_request_handler::{
     CopilotWebSocketForwarderBuilder, CopilotWebSocketHandler, CopilotWebSocketMessage,
     CopilotWebSocketResponse, WebSocketTransform, forward_http,
 };
-use crate::generated::api_types::OpenCanvasInstance;
+use crate::generated::api_types::{CurrentToolMetadata, OpenCanvasInstance};
 use crate::generated::session_events::ReasoningSummary;
 /// Context window tier for models that support tiered context windows.
 pub use crate::generated::session_events::{ContextTier, SessionLimitsConfig};
@@ -352,6 +352,12 @@ pub struct Tool {
     /// runtime decide.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub defer: Option<DeferMode>,
+    /// Opaque, host-defined metadata associated with the tool definition.
+    /// Keys are namespaced and not part of the stable public API; values are
+    /// not interpreted and may be recognized to inform host-specific behavior.
+    /// Unknown keys are preserved and round-tripped untouched.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub metadata: IndexMap<String, Value>,
     /// Optional runtime implementation. When `Some`, the SDK dispatches
     /// matching `external_tool.requested` broadcasts to this handler.
     /// When `None`, the tool is declaration-only.
@@ -471,6 +477,13 @@ impl Tool {
         self
     }
 
+    /// Set opaque, host-defined metadata for the tool. Keys are namespaced and
+    /// not part of the stable public API. Replaces any previously-set metadata.
+    pub fn with_metadata(mut self, metadata: IndexMap<String, Value>) -> Self {
+        self.metadata = metadata;
+        self
+    }
+
     /// Attach a runtime implementation. The SDK will dispatch matching
     /// `external_tool.requested` broadcasts to `handler` for this tool's
     /// name. Without a handler the tool is declaration-only.
@@ -499,6 +512,7 @@ impl std::fmt::Debug for Tool {
             .field("overrides_built_in_tool", &self.overrides_built_in_tool)
             .field("skip_permission", &self.skip_permission)
             .field("defer", &self.defer)
+            .field("metadata", &self.metadata)
             .field(
                 "handler",
                 &self.handler.as_ref().map(|_| "<set>").unwrap_or("None"),
@@ -628,6 +642,12 @@ pub struct CustomAgentConfig {
     /// falling back to the parent session model if unavailable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Reasoning effort level for this agent's model.
+    ///
+    /// When unset, no per-agent override is sent and the backend chooses its
+    /// default. The parent session effort is not inherited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
 }
 
 impl CustomAgentConfig {
@@ -695,6 +715,12 @@ impl CustomAgentConfig {
         self.model = Some(model.into());
         self
     }
+
+    /// Set the reasoning effort level for this agent's model.
+    pub fn with_reasoning_effort(mut self, reasoning_effort: impl Into<String>) -> Self {
+        self.reasoning_effort = Some(reasoning_effort.into());
+        self
+    }
 }
 
 /// Configures the default (built-in) agent that handles turns when no
@@ -755,6 +781,45 @@ impl LargeToolOutputConfig {
     /// Set the directory where large tool output files are written.
     pub fn with_output_directory<P: Into<PathBuf>>(mut self, output_directory: P) -> Self {
         self.output_directory = Some(output_directory.into());
+        self
+    }
+}
+
+/// Overrides the runtime's built-in tool-search behavior.
+///
+/// Tool search defers tools to keep the model's active tool set small.
+/// To override the tool-search tool's implementation, register a [`Tool`]
+/// named `"tool_search_tool"` with [`Tool::overrides_built_in_tool`] set to `true`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct ToolSearchConfig {
+    /// Toggle to enable/disable tool search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// The tool count above which MCP and external tools are deferred behind
+    /// tool search. When unset, the runtime default (30) applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub defer_threshold: Option<u32>,
+}
+
+impl ToolSearchConfig {
+    /// Construct an empty [`ToolSearchConfig`]; all fields default to unset
+    /// (the runtime applies its own defaults).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Toggle that enables or disables tool search.
+    pub fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = Some(enabled);
+        self
+    }
+
+    /// Set the tool count above which MCP and external tools are deferred
+    /// behind tool search.
+    pub fn with_defer_threshold(mut self, defer_threshold: u32) -> Self {
+        self.defer_threshold = Some(defer_threshold);
         self
     }
 }
@@ -1543,6 +1608,67 @@ impl ProviderModelConfig {
     }
 }
 
+/// A single ExP (Experiment Platform) flag value.
+///
+/// ExP assignments resolve to a string, number, boolean, or null.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ExpFlagValue {
+    /// A boolean flag value.
+    Bool(bool),
+    /// An integer flag value.
+    Integer(i64),
+    /// A floating-point flag value.
+    Float(f64),
+    /// A string flag value.
+    String(String),
+    /// A null flag value.
+    Null,
+}
+
+/// A single configuration entry in a [`CopilotExpAssignmentResponse`].
+///
+/// Each entry carries an identifier and a bag of typed parameter values.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct ExpConfigEntry {
+    /// Identifier of the configuration entry.
+    pub id: String,
+    /// Parameter values keyed by parameter name.
+    pub parameters: HashMap<String, ExpFlagValue>,
+}
+
+/// ExP ("flight") assignment data, in the same JSON shape the Copilot CLI
+/// fetches from the experimentation service.
+///
+/// Field names serialize as PascalCase (`Features`, `Flights`, ...) to match
+/// the on-the-wire contract consumed by the runtime.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct CopilotExpAssignmentResponse {
+    /// Enabled feature names.
+    #[serde(default)]
+    pub features: Vec<String>,
+    /// Assigned flights keyed by flight name.
+    #[serde(default)]
+    pub flights: HashMap<String, String>,
+    /// Configuration entries carrying typed parameter values.
+    #[serde(default)]
+    pub configs: Vec<ExpConfigEntry>,
+    /// Opaque parameter-group payload passed through untouched. Optional.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parameter_groups: Option<Value>,
+    /// Version of the flighting configuration. Optional.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flighting_version: Option<i64>,
+    /// Impression identifier for the assignment. Optional.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub impression_id: Option<String>,
+    /// Assignment context string forwarded to CAPI and telemetry.
+    #[serde(default)]
+    pub assignment_context: String,
+}
+
 /// Configuration for creating a new session via the `session.create` RPC.
 ///
 /// All fields are optional — the CLI applies sensible defaults.
@@ -1714,6 +1840,10 @@ pub struct SessionConfig {
     pub plugin_directories: Option<Vec<PathBuf>>,
     /// Configuration for large tool output handling, forwarded to the CLI.
     pub large_output: Option<LargeToolOutputConfig>,
+    /// Overrides the runtime's built-in tool-search behavior, which defers
+    /// rarely used tools behind a searchable index. When unset, the runtime
+    /// default applies.
+    pub tool_search: Option<ToolSearchConfig>,
     /// Skill names to disable. Skills in this set will not be available
     /// even if found in skill directories.
     pub disabled_skills: Option<Vec<String>>,
@@ -1809,7 +1939,7 @@ pub struct SessionConfig {
     /// When absent, the session does not block on ExP. Set via
     /// [`with_exp_assignments`](Self::with_exp_assignments).
     #[doc(hidden)]
-    pub exp_assignments: Option<Value>,
+    pub exp_assignments: Option<CopilotExpAssignmentResponse>,
     /// Opt-in: when `Some(true)`, the runtime self-fetches enterprise managed
     /// settings (bypass-permissions policy) at session bootstrap using the
     /// session's [`github_token`](Self::github_token). Requires `github_token`
@@ -1926,6 +2056,7 @@ impl std::fmt::Debug for SessionConfig {
             .field("instruction_directories", &self.instruction_directories)
             .field("plugin_directories", &self.plugin_directories)
             .field("large_output", &self.large_output)
+            .field("tool_search", &self.tool_search)
             .field("disabled_skills", &self.disabled_skills)
             .field("hooks", &self.hooks)
             .field("custom_agents", &self.custom_agents)
@@ -2037,6 +2168,7 @@ impl Default for SessionConfig {
             instruction_directories: None,
             plugin_directories: None,
             large_output: None,
+            tool_search: None,
             disabled_skills: None,
             hooks: None,
             custom_agents: None,
@@ -2195,6 +2327,7 @@ impl SessionConfig {
             instruction_directories: self.instruction_directories,
             plugin_directories: self.plugin_directories,
             large_output: self.large_output,
+            tool_search: self.tool_search,
             disabled_skills: self.disabled_skills,
             custom_agents: self.custom_agents,
             default_agent: self.default_agent,
@@ -2606,6 +2739,13 @@ impl SessionConfig {
         self
     }
 
+    /// Set the [`ToolSearchConfig`] overriding the runtime's built-in
+    /// tool-search behavior on session create.
+    pub fn with_tool_search(mut self, config: ToolSearchConfig) -> Self {
+        self.tool_search = Some(config);
+        self
+    }
+
     /// Set the names of skills to disable (overrides skill discovery).
     pub fn with_disabled_skills<I, S>(mut self, names: I) -> Self
     where
@@ -2788,7 +2928,7 @@ impl SessionConfig {
     /// integrators that fetch ExP data out of process; malformed payloads
     /// are dropped by the runtime (fail-open).
     #[doc(hidden)]
-    pub fn with_exp_assignments(mut self, assignments: Value) -> Self {
+    pub fn with_exp_assignments(mut self, assignments: CopilotExpAssignmentResponse) -> Self {
         self.exp_assignments = Some(assignments);
         self
     }
@@ -2903,6 +3043,9 @@ pub struct ResumeSessionConfig {
     pub plugin_directories: Option<Vec<PathBuf>>,
     /// Configuration for large tool output handling, forwarded to the CLI on resume.
     pub large_output: Option<LargeToolOutputConfig>,
+    /// Overrides the runtime's built-in tool-search behavior on resume. When
+    /// unset, the runtime default applies.
+    pub tool_search: Option<ToolSearchConfig>,
     /// Skill names to disable on resume.
     pub disabled_skills: Option<Vec<String>>,
     /// Enable session hooks on resume.
@@ -2972,7 +3115,7 @@ pub struct ResumeSessionConfig {
     /// re-applies the assignments after a CLI process restart. Set via
     /// [`with_exp_assignments`](Self::with_exp_assignments).
     #[doc(hidden)]
-    pub exp_assignments: Option<Value>,
+    pub exp_assignments: Option<CopilotExpAssignmentResponse>,
     /// Opt-in flag injected on resume. See
     /// [`SessionConfig::enable_managed_settings`]. Re-supply on resume so
     /// the runtime re-applies the managed-settings self-fetch after a CLI
@@ -3082,6 +3225,7 @@ impl std::fmt::Debug for ResumeSessionConfig {
             .field("instruction_directories", &self.instruction_directories)
             .field("plugin_directories", &self.plugin_directories)
             .field("large_output", &self.large_output)
+            .field("tool_search", &self.tool_search)
             .field("disabled_skills", &self.disabled_skills)
             .field("hooks", &self.hooks)
             .field("custom_agents", &self.custom_agents)
@@ -3237,6 +3381,7 @@ impl ResumeSessionConfig {
             instruction_directories: self.instruction_directories,
             plugin_directories: self.plugin_directories,
             large_output: self.large_output,
+            tool_search: self.tool_search,
             disabled_skills: self.disabled_skills,
             custom_agents: self.custom_agents,
             default_agent: self.default_agent,
@@ -3326,6 +3471,7 @@ impl ResumeSessionConfig {
             instruction_directories: None,
             plugin_directories: None,
             large_output: None,
+            tool_search: None,
             disabled_skills: None,
             hooks: None,
             custom_agents: None,
@@ -3717,6 +3863,13 @@ impl ResumeSessionConfig {
         self
     }
 
+    /// Set the [`ToolSearchConfig`] overriding the runtime's built-in
+    /// tool-search behavior on resume.
+    pub fn with_tool_search(mut self, config: ToolSearchConfig) -> Self {
+        self.tool_search = Some(config);
+        self
+    }
+
     /// Set the names of skills to disable on resume.
     pub fn with_disabled_skills<I, S>(mut self, names: I) -> Self
     where
@@ -3901,7 +4054,7 @@ impl ResumeSessionConfig {
     /// [`SessionConfig::with_exp_assignments`]. Re-supply the assignments on
     /// resume so the runtime re-applies them after a CLI process restart.
     #[doc(hidden)]
-    pub fn with_exp_assignments(mut self, assignments: Value) -> Self {
+    pub fn with_exp_assignments(mut self, assignments: CopilotExpAssignmentResponse) -> Self {
         self.exp_assignments = Some(assignments);
         self
     }
@@ -4843,6 +4996,15 @@ pub struct ToolInvocation {
     pub tool_name: String,
     /// Tool arguments as JSON.
     pub arguments: Value,
+    /// Snapshot of the session's currently initialized tools.
+    ///
+    /// The SDK populates this only when the invocation targets the built-in
+    /// tool-search tool (`tool_search_tool`), so a tool-search override can
+    /// rank/filter the live catalog — including MCP tools configured in
+    /// settings — without issuing its own RPC. `None` for every other tool
+    /// invocation. This field is not part of the wire protocol.
+    #[serde(skip)]
+    pub available_tools: Option<Vec<CurrentToolMetadata>>,
     /// W3C Trace Context `traceparent` header propagated from the CLI's
     /// `execute_tool` span. Pass through to OpenTelemetry-aware code so
     /// child spans created inside the handler are parented to the CLI
@@ -4906,8 +5068,14 @@ pub struct ToolBinaryResult {
 }
 
 /// Expanded tool result with metadata for the LLM and session log.
+///
+/// This type is `#[non_exhaustive]`: it mirrors a growing wire shape, so
+/// construct it via [`ToolResultExpanded::new`] plus the `with_*` chain
+/// rather than a struct literal, allowing new fields to land without
+/// breaking callers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct ToolResultExpanded {
     /// Result text sent back to the LLM.
     pub text_result_for_llm: String,
@@ -4925,6 +5093,60 @@ pub struct ToolResultExpanded {
     /// Tool-specific telemetry emitted with the result.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_telemetry: Option<HashMap<String, Value>>,
+    /// Names of tools returned by a tool-search tool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_references: Option<Vec<String>>,
+}
+
+impl ToolResultExpanded {
+    /// Construct an expanded result with the required `text_result_for_llm`
+    /// and `result_type` (`"success"` or `"failure"`). All optional metadata
+    /// fields start unset; populate them with the `with_*` builders.
+    pub fn new(text_result_for_llm: impl Into<String>, result_type: impl Into<String>) -> Self {
+        Self {
+            text_result_for_llm: text_result_for_llm.into(),
+            result_type: result_type.into(),
+            binary_results_for_llm: None,
+            session_log: None,
+            error: None,
+            tool_telemetry: None,
+            tool_references: None,
+        }
+    }
+
+    /// Set the binary payloads returned to the LLM.
+    pub fn with_binary_results(mut self, results: Vec<ToolBinaryResult>) -> Self {
+        self.binary_results_for_llm = Some(results);
+        self
+    }
+
+    /// Set the log message for the session timeline.
+    pub fn with_session_log(mut self, session_log: impl Into<String>) -> Self {
+        self.session_log = Some(session_log.into());
+        self
+    }
+
+    /// Set the error message, marking the tool as failed.
+    pub fn with_error(mut self, error: impl Into<String>) -> Self {
+        self.error = Some(error.into());
+        self
+    }
+
+    /// Set the tool-specific telemetry emitted with the result.
+    pub fn with_tool_telemetry(mut self, telemetry: HashMap<String, Value>) -> Self {
+        self.tool_telemetry = Some(telemetry);
+        self
+    }
+
+    /// Set the names of tools returned by a tool-search tool.
+    pub fn with_tool_references<I, S>(mut self, references: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.tool_references = Some(references.into_iter().map(Into::into).collect());
+        self
+    }
 }
 
 /// Result of a tool invocation — either a plain text string or an expanded result.
@@ -5259,6 +5481,7 @@ impl Default for ExitPlanModeData {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::path::PathBuf;
 
     use serde_json::json;
@@ -5266,7 +5489,8 @@ mod tests {
     use super::{
         AgentMode, Attachment, AttachmentLineRange, AttachmentSelectionPosition,
         AttachmentSelectionRange, AzureProviderOptions, CapiSessionOptions, ConnectionState,
-        CustomAgentConfig, DeliveryMode, ExtensionInfo, GitHubReferenceType, InfiniteSessionConfig,
+        CopilotExpAssignmentResponse, CustomAgentConfig, DeliveryMode, ExpConfigEntry,
+        ExpFlagValue, ExtensionInfo, GitHubReferenceType, InfiniteSessionConfig,
         LargeToolOutputConfig, McpServerConfig, McpStdioServerConfig, MemoryConfiguration,
         NamedProviderConfig, ProviderConfig, ProviderModelConfig, ReasoningSummary,
         ResumeSessionConfig, SessionConfig, SessionEvent, SessionId, SystemMessageConfig, Tool,
@@ -5310,6 +5534,32 @@ mod tests {
     }
 
     #[test]
+    fn tool_metadata_serialization() {
+        use indexmap::IndexMap;
+
+        let mut metadata = IndexMap::new();
+        metadata.insert(
+            "github.com/copilot:safeForTelemetry".to_string(),
+            json!({ "name": true, "inputsNames": false }),
+        );
+        let tool = Tool::new("lookup").with_metadata(metadata);
+        let value = serde_json::to_value(&tool).unwrap();
+        assert_eq!(
+            value
+                .get("metadata")
+                .unwrap()
+                .get("github.com/copilot:safeForTelemetry")
+                .unwrap(),
+            &json!({ "name": true, "inputsNames": false })
+        );
+
+        // Empty metadata is omitted on the wire.
+        let plain = Tool::new("plain");
+        let value = serde_json::to_value(&plain).unwrap();
+        assert!(value.get("metadata").is_none());
+    }
+
+    #[test]
     fn custom_agent_config_builder_with_model() {
         let agent = CustomAgentConfig::new("my-agent", "You are helpful.")
             .with_model("claude-haiku-4.5")
@@ -5335,6 +5585,28 @@ mod tests {
     }
 
     #[test]
+    fn custom_agent_config_builder_with_reasoning_effort() {
+        let agent =
+            CustomAgentConfig::new("reasoning-agent", "prompt").with_reasoning_effort("high");
+        assert_eq!(agent.reasoning_effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn custom_agent_config_serializes_reasoning_effort() {
+        let agent =
+            CustomAgentConfig::new("reasoning-agent", "prompt").with_reasoning_effort("high");
+        let wire = serde_json::to_value(&agent).unwrap();
+        assert_eq!(wire["reasoningEffort"], "high");
+    }
+
+    #[test]
+    fn custom_agent_config_omits_reasoning_effort_when_none() {
+        let agent = CustomAgentConfig::new("default-agent", "prompt");
+        let wire = serde_json::to_value(&agent).unwrap();
+        assert!(wire.get("reasoningEffort").is_none());
+    }
+
+    #[test]
     #[should_panic(expected = "tool parameter schema must be a JSON object")]
     fn tool_with_parameters_panics_on_non_object_value() {
         let _ = Tool::new("noop").with_parameters(json!(null));
@@ -5355,6 +5627,7 @@ mod tests {
                 session_log: None,
                 error: None,
                 tool_telemetry: None,
+                tool_references: None,
             }),
         };
 
@@ -5389,6 +5662,7 @@ mod tests {
                 session_log: None,
                 error: None,
                 tool_telemetry: None,
+                tool_references: None,
             }),
         };
 
@@ -5396,6 +5670,70 @@ mod tests {
 
         assert_eq!(wire["result"]["textResultForLlm"], "ok");
         assert!(wire["result"].get("binaryResultsForLlm").is_none());
+    }
+
+    #[test]
+    fn tool_result_expanded_serializes_tool_references() {
+        let response = ToolResultResponse {
+            result: ToolResult::Expanded(
+                ToolResultExpanded::new("found 2 tools", "success")
+                    .with_tool_references(["get_weather", "check_status"]),
+            ),
+        };
+
+        let wire = serde_json::to_value(&response).unwrap();
+
+        assert_eq!(
+            wire,
+            json!({
+                "result": {
+                    "textResultForLlm": "found 2 tools",
+                    "resultType": "success",
+                    "toolReferences": ["get_weather", "check_status"]
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn tool_result_expanded_omits_tool_references_when_none() {
+        let response = ToolResultResponse {
+            result: ToolResult::Expanded(ToolResultExpanded::new("ok", "success")),
+        };
+
+        let wire = serde_json::to_value(&response).unwrap();
+
+        assert_eq!(wire["result"]["textResultForLlm"], "ok");
+        assert!(wire["result"].get("toolReferences").is_none());
+    }
+
+    #[test]
+    fn tool_result_expanded_with_tool_references_accepts_owned_strings() {
+        // The builder is generic over `Into<String>`, so an owned `Vec<String>`
+        // must compile and populate the field just like a `&str` array.
+        let names: Vec<String> = vec!["alpha".to_string(), "beta".to_string()];
+        let expanded = ToolResultExpanded::new("ok", "success").with_tool_references(names);
+
+        assert_eq!(
+            expanded.tool_references.as_deref(),
+            Some(["alpha".to_string(), "beta".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn tool_result_expanded_deserializes_tool_references() {
+        let wire = json!({
+            "textResultForLlm": "found tools",
+            "resultType": "success",
+            "toolReferences": ["alpha", "beta"]
+        });
+
+        let expanded: ToolResultExpanded = serde_json::from_value(wire).unwrap();
+
+        assert_eq!(
+            expanded.tool_references.as_deref(),
+            Some(["alpha".to_string(), "beta".to_string()].as_slice())
+        );
     }
 
     #[test]
@@ -5513,18 +5851,55 @@ mod tests {
         assert!(empty_json.get("memory").is_none());
     }
 
+    fn sample_exp_assignments(context: &str) -> CopilotExpAssignmentResponse {
+        CopilotExpAssignmentResponse {
+            features: vec!["copilot_exp_flag".to_string()],
+            flights: HashMap::from([("copilot_exp_flag".to_string(), "treatment".to_string())]),
+            configs: vec![ExpConfigEntry {
+                id: "cfg-1".to_string(),
+                parameters: HashMap::from([
+                    ("threshold".to_string(), ExpFlagValue::Integer(5)),
+                    ("enabled".to_string(), ExpFlagValue::Bool(true)),
+                ]),
+            }],
+            assignment_context: context.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn exp_flag_value_round_trips_all_variants() {
+        let values = serde_json::json!({
+            "s": "text",
+            "i": 7,
+            "f": 1.5,
+            "b": true,
+            "n": null,
+        });
+        let parsed: HashMap<String, ExpFlagValue> = serde_json::from_value(values.clone()).unwrap();
+        assert_eq!(parsed["s"], ExpFlagValue::String("text".to_string()));
+        assert_eq!(parsed["i"], ExpFlagValue::Integer(7));
+        assert_eq!(parsed["f"], ExpFlagValue::Float(1.5));
+        assert_eq!(parsed["b"], ExpFlagValue::Bool(true));
+        assert_eq!(parsed["n"], ExpFlagValue::Null);
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), values);
+    }
+
     #[test]
     fn session_config_with_exp_assignments_serializes() {
-        let assignments = serde_json::json!({
-            "Parameters": { "copilot_exp_flag": "treatment" },
-            "AssignmentContext": "ctx-123",
-        });
+        let assignments = sample_exp_assignments("ctx-123");
+        let expected = serde_json::to_value(&assignments).unwrap();
         let (wire, _runtime) = SessionConfig::default()
-            .with_exp_assignments(assignments.clone())
+            .with_exp_assignments(assignments)
             .into_wire(Some(SessionId::from("exp-on")))
             .expect("no duplicate handlers");
         let json = serde_json::to_value(&wire).unwrap();
-        assert_eq!(json["expAssignments"], assignments);
+        assert_eq!(json["expAssignments"], expected);
+        assert_eq!(json["expAssignments"]["AssignmentContext"], "ctx-123");
+        assert_eq!(
+            json["expAssignments"]["Flights"]["copilot_exp_flag"],
+            "treatment"
+        );
 
         // Unset exp assignments are omitted on the wire.
         let (empty_wire, _) = SessionConfig::default()
@@ -5536,16 +5911,14 @@ mod tests {
 
     #[test]
     fn resume_session_config_with_exp_assignments_serializes() {
-        let assignments = serde_json::json!({
-            "Parameters": { "copilot_exp_flag": "treatment" },
-            "AssignmentContext": "ctx-456",
-        });
+        let assignments = sample_exp_assignments("ctx-456");
+        let expected = serde_json::to_value(&assignments).unwrap();
         let (wire, _runtime) = ResumeSessionConfig::new(SessionId::from("resume-exp-on"))
-            .with_exp_assignments(assignments.clone())
+            .with_exp_assignments(assignments)
             .into_wire()
             .expect("no duplicate handlers");
         let json = serde_json::to_value(&wire).unwrap();
-        assert_eq!(json["expAssignments"], assignments);
+        assert_eq!(json["expAssignments"], expected);
 
         // Unset exp assignments are omitted on the wire.
         let (empty_wire, _) = ResumeSessionConfig::new(SessionId::from("resume-exp-unset"))
@@ -5557,10 +5930,7 @@ mod tests {
 
     #[test]
     fn session_config_clone_preserves_exp_assignments() {
-        let assignments = serde_json::json!({
-            "Parameters": { "copilot_exp_flag": "treatment" },
-            "AssignmentContext": "ctx-clone",
-        });
+        let assignments = sample_exp_assignments("ctx-clone");
         let config = SessionConfig::default().with_exp_assignments(assignments.clone());
         let cloned = config.clone();
 
@@ -5570,15 +5940,15 @@ mod tests {
             .into_wire(Some(SessionId::from("exp-clone")))
             .expect("no duplicate handlers");
         let json = serde_json::to_value(&wire).unwrap();
-        assert_eq!(json["expAssignments"], assignments);
+        assert_eq!(
+            json["expAssignments"],
+            serde_json::to_value(&assignments).unwrap()
+        );
     }
 
     #[test]
     fn resume_session_config_clone_preserves_exp_assignments() {
-        let assignments = serde_json::json!({
-            "Parameters": { "copilot_exp_flag": "treatment" },
-            "AssignmentContext": "ctx-clone-resume",
-        });
+        let assignments = sample_exp_assignments("ctx-clone-resume");
         let config = ResumeSessionConfig::new(SessionId::from("resume-exp-clone"))
             .with_exp_assignments(assignments.clone());
         let cloned = config.clone();
@@ -5587,7 +5957,10 @@ mod tests {
 
         let (wire, _runtime) = cloned.into_wire().expect("no duplicate handlers");
         let json = serde_json::to_value(&wire).unwrap();
-        assert_eq!(json["expAssignments"], assignments);
+        assert_eq!(
+            json["expAssignments"],
+            serde_json::to_value(&assignments).unwrap()
+        );
     }
 
     #[test]

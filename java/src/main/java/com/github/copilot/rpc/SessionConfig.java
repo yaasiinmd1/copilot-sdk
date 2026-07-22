@@ -13,7 +13,6 @@ import java.util.function.Consumer;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonIgnore;
-import com.fasterxml.jackson.databind.JsonNode;
 
 import com.github.copilot.CopilotExperimental;
 import com.github.copilot.generated.SessionEvent;
@@ -80,6 +79,7 @@ public class SessionConfig {
     private List<String> instructionDirectories;
     private List<String> pluginDirectories;
     private LargeToolOutputConfig largeOutput;
+    private ToolSearchConfig toolSearch;
     private MemoryConfiguration memory;
     private List<String> disabledSkills;
     private String configDirectory;
@@ -102,7 +102,7 @@ public class SessionConfig {
     private String gitHubToken;
     private String remoteSession;
     private CloudSessionOptions cloud;
-    private JsonNode expAssignments;
+    private CopilotExpAssignmentResponse expAssignments;
     private Boolean enableManagedSettings;
 
     /**
@@ -1131,6 +1131,28 @@ public class SessionConfig {
     }
 
     /**
+     * Gets the tool-search override configuration.
+     *
+     * @return the tool-search config, or {@code null} for the runtime default
+     */
+    public ToolSearchConfig getToolSearch() {
+        return toolSearch;
+    }
+
+    /**
+     * Sets the tool-search override configuration. When {@code null}, the runtime
+     * default tool-search behavior applies.
+     *
+     * @param toolSearch
+     *            the tool-search config
+     * @return this config instance for method chaining
+     */
+    public SessionConfig setToolSearch(ToolSearchConfig toolSearch) {
+        this.toolSearch = toolSearch;
+        return this;
+    }
+
+    /**
      * Gets the configuration for session memory.
      *
      * @return the memory config, or {@code null} for default
@@ -1850,15 +1872,15 @@ public class SessionConfig {
      *
      * @return the ExP assignment data, or {@code null} if not set
      */
-    public JsonNode getExpAssignments() {
+    public CopilotExpAssignmentResponse getExpAssignments() {
         return expAssignments;
     }
 
     /**
      * Sets ExP assignment ("flight") data injected by a trusted integrator.
      * <p>
-     * The value is opaque JSON in the same shape the Copilot CLI fetches from the
-     * experimentation service ({@code CopilotExpAssignmentResponse}). When
+     * The value is in the same shape the Copilot CLI fetches from the
+     * experimentation service ({@link CopilotExpAssignmentResponse}). When
      * provided, the runtime feeds it into the same feature-flag path as CLI-fetched
      * assignments and stamps it onto telemetry and the CAPI request header. When
      * absent, the session does not block on ExP. Intended for out-of-process
@@ -1869,10 +1891,10 @@ public class SessionConfig {
      * advertised public surface.
      *
      * @param expAssignments
-     *            the opaque ExP assignment data
+     *            the ExP assignment data
      * @return this config instance for method chaining
      */
-    public SessionConfig setExpAssignments(JsonNode expAssignments) {
+    public SessionConfig setExpAssignments(CopilotExpAssignmentResponse expAssignments) {
         this.expAssignments = expAssignments;
         return this;
     }
@@ -1964,6 +1986,7 @@ public class SessionConfig {
                 : null;
         copy.pluginDirectories = this.pluginDirectories != null ? new ArrayList<>(this.pluginDirectories) : null;
         copy.largeOutput = this.largeOutput;
+        copy.toolSearch = this.toolSearch;
         copy.memory = this.memory;
         copy.disabledSkills = this.disabledSkills != null ? new ArrayList<>(this.disabledSkills) : null;
         copy.configDirectory = this.configDirectory;

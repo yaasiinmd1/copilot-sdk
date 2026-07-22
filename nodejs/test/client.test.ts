@@ -433,6 +433,71 @@ describe("CopilotClient", () => {
         expect(resumePayload.contextTier).toBe("default");
     });
 
+    it("forwards tool metadata verbatim in session.create and session.resume", async () => {
+        const client = new CopilotClient();
+        await client.start();
+        onTestFinished(() => client.forceStop());
+
+        const spy = vi
+            .spyOn((client as any).connection!, "sendRequest")
+            .mockImplementation(async (method: string, params: any) => {
+                if (method === "session.create") return { sessionId: params.sessionId };
+                if (method === "session.resume") return { sessionId: params.sessionId };
+                throw new Error(`Unexpected method: ${method}`);
+            });
+
+        const metadata = {
+            "github.com/copilot:safeForTelemetry": { name: true, inputsNames: false },
+        };
+        const tool = {
+            name: "my_tool",
+            description: "a tool",
+            parameters: { type: "object", properties: {} },
+            metadata,
+        };
+
+        const session = await client.createSession({
+            onPermissionRequest: approveAll,
+            tools: [tool],
+        });
+        await client.resumeSession(session.sessionId, {
+            onPermissionRequest: approveAll,
+            tools: [tool],
+        });
+
+        const createPayload = spy.mock.calls.find(
+            ([method]) => method === "session.create"
+        )![1] as any;
+        const resumePayload = spy.mock.calls.find(
+            ([method]) => method === "session.resume"
+        )![1] as any;
+        expect(createPayload.tools[0].metadata).toEqual(metadata);
+        expect(resumePayload.tools[0].metadata).toEqual(metadata);
+    });
+
+    it("omits tool metadata from session.create when unset", async () => {
+        const client = new CopilotClient();
+        await client.start();
+        onTestFinished(() => client.forceStop());
+
+        const spy = vi
+            .spyOn((client as any).connection!, "sendRequest")
+            .mockImplementation(async (method: string, params: any) => {
+                if (method === "session.create") return { sessionId: params.sessionId };
+                throw new Error(`Unexpected method: ${method}`);
+            });
+
+        await client.createSession({
+            onPermissionRequest: approveAll,
+            tools: [{ name: "my_tool", description: "a tool" }],
+        });
+
+        const createPayload = spy.mock.calls.find(
+            ([method]) => method === "session.create"
+        )![1] as any;
+        expect(createPayload.tools[0].metadata).toBeUndefined();
+    });
+
     it("forwards new session options in session.create and session.resume", async () => {
         const client = new CopilotClient();
         await client.start();
@@ -652,7 +717,9 @@ describe("CopilotClient", () => {
             });
 
         const assignments = {
-            Parameters: { copilot_exp_flag: "treatment" },
+            Features: ["copilot_exp_flag"],
+            Flights: { copilot_exp_flag: "treatment" },
+            Configs: [{ Id: "cfg-1", Parameters: { threshold: 5, enabled: true } }],
             AssignmentContext: "ctx-123",
         };
 
@@ -2007,6 +2074,77 @@ describe("CopilotClient", () => {
                 /gitHubToken and useLoggedInUser cannot be used with RuntimeConnection.forUri/
             );
         });
+
+        it("should throw error when env is used with forInProcess", () => {
+            expect(() => {
+                new CopilotClient({
+                    connection: RuntimeConnection.forInProcess(),
+                    env: { FOO: "bar" },
+                    logLevel: "error",
+                });
+            }).toThrow(/env is not supported with RuntimeConnection.forInProcess/);
+        });
+
+        it("should throw error when telemetry is used with forInProcess", () => {
+            expect(() => {
+                new CopilotClient({
+                    connection: RuntimeConnection.forInProcess(),
+                    telemetry: { otlpEndpoint: "http://localhost:4318" },
+                    logLevel: "error",
+                });
+            }).toThrow(/telemetry is not supported with RuntimeConnection.forInProcess/);
+        });
+
+        it("should throw error when workingDirectory is used with forInProcess", () => {
+            expect(() => {
+                new CopilotClient({
+                    connection: RuntimeConnection.forInProcess(),
+                    workingDirectory: "/tmp",
+                    logLevel: "error",
+                });
+            }).toThrow(/workingDirectory is not supported with RuntimeConnection.forInProcess/);
+        });
+
+        it("should throw error when env is set on both the client and a stdio connection", () => {
+            expect(() => {
+                new CopilotClient({
+                    connection: RuntimeConnection.forStdio({ env: { FOO: "conn" } }),
+                    env: { FOO: "client" },
+                    logLevel: "error",
+                });
+            }).toThrow(
+                /Set environment variables via either the client-level env option or the connection/
+            );
+        });
+
+        it("should throw error when env is set on both the client and a tcp connection", () => {
+            expect(() => {
+                new CopilotClient({
+                    connection: RuntimeConnection.forTcp({ env: { FOO: "conn" } }),
+                    env: { FOO: "client" },
+                    logLevel: "error",
+                });
+            }).toThrow(
+                /Set environment variables via either the client-level env option or the connection/
+            );
+        });
+
+        it("should use the connection-level env for child-process transports", () => {
+            const client = new CopilotClient({
+                connection: RuntimeConnection.forStdio({ env: { FOO: "from-conn" } }),
+                logLevel: "error",
+            });
+            expect((client as any).resolvedEnv).toEqual({ FOO: "from-conn" });
+        });
+
+        it("should allow env on the client alone with a child-process transport", () => {
+            const client = new CopilotClient({
+                connection: RuntimeConnection.forStdio(),
+                env: { FOO: "from-client" },
+                logLevel: "error",
+            });
+            expect((client as any).resolvedEnv).toEqual({ FOO: "from-client" });
+        });
     });
 
     describe("overridesBuiltInTool in tool definitions", () => {
@@ -2145,9 +2283,10 @@ describe("CopilotClient", () => {
             const payload = spy.mock.calls.find((c) => c[0] === "session.create")![1] as any;
             expect(payload.agent).toBe("test-agent");
             expect(payload.customAgents).toEqual([expect.objectContaining({ name: "test-agent" })]);
+            expect(payload.customAgents[0].reasoningEffort).toBeUndefined();
         });
 
-        it("forwards custom agent model in session.create request", async () => {
+        it("forwards custom agent model and reasoning effort in session.create request", async () => {
             const client = new CopilotClient();
             await client.start();
             onTestFinished(() => stopClient(client));
@@ -2160,13 +2299,18 @@ describe("CopilotClient", () => {
                         name: "model-agent",
                         prompt: "You are a model agent.",
                         model: "claude-haiku-4.5",
+                        reasoningEffort: "high",
                     },
                 ],
             });
 
             const payload = spy.mock.calls.find((c) => c[0] === "session.create")![1] as any;
             expect(payload.customAgents).toEqual([
-                expect.objectContaining({ name: "model-agent", model: "claude-haiku-4.5" }),
+                expect.objectContaining({
+                    name: "model-agent",
+                    model: "claude-haiku-4.5",
+                    reasoningEffort: "high",
+                }),
             ]);
         });
 
@@ -2997,7 +3141,7 @@ describe("CopilotClient", () => {
 
         it("routes hooks.invoke JSON-RPC requests to the SessionHooks handler", async () => {
             // Validates the full JSON-RPC entry point used by the CLI:
-            // CopilotClient.handleHooksInvoke({sessionId, hookType, input})
+            // clientGlobalHandlers.hooks.invoke({sessionId, hookType, input})
             // → CopilotSession._handleHooksInvoke(hookType, input)
             // → SessionHooks.onPostToolUseFailure(normalizedInput, {sessionId})
             //
@@ -3028,7 +3172,7 @@ describe("CopilotClient", () => {
                 cwd: "/tmp",
             };
 
-            const response = await (client as any).handleHooksInvoke({
+            const response = await (client as any).clientGlobalHandlers.hooks.invoke({
                 sessionId: session.sessionId,
                 hookType: "postToolUseFailure",
                 input: failureInput,

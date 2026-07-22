@@ -11,6 +11,7 @@ const {
     homeDir,
     workDir,
     env,
+    createClient,
 } = await createSdkTestContext();
 
 describe("Sessions", () => {
@@ -368,8 +369,7 @@ describe("Sessions", () => {
         expect(answer?.data.content).toContain("2");
 
         // Resume using a new client
-        const newClient = new CopilotClient({
-            env,
+        const newClient = createClient({
             gitHubToken: isCI ? "fake-token-for-e2e-tests" : undefined,
         });
 
@@ -466,8 +466,7 @@ describe("Sessions", () => {
         // `session.eventLog.registerInterest` for `mcp.oauth_required`; that must
         // be sent AFTER `session.resume`, otherwise the runtime rejects it with
         // "Session not found: <id>".
-        const newClient = new CopilotClient({
-            env,
+        const newClient = createClient({
             gitHubToken: isCI
                 ? DEFAULT_GITHUB_TOKEN
                 : (process.env.GITHUB_TOKEN ?? DEFAULT_GITHUB_TOKEN),
@@ -504,8 +503,10 @@ describe("Sessions", () => {
         expect(messages.some((m) => m.type === "abort")).toBe(true);
 
         // We should be able to send another message
-        const answer = await session.sendAndWait({ prompt: "What is 2+2?" });
-        expect(answer?.data.content).toContain("4");
+        const nextAssistantMessage = getNextEventOfType(session, "assistant.message");
+        await session.send({ prompt: "What is 2+2?" });
+        const answer = await nextAssistantMessage;
+        expect(answer.data.content).toContain("4");
     });
 
     it("should receive session events", async () => {

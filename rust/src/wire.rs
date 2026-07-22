@@ -27,7 +27,7 @@ use crate::types::{
     CanvasProviderIdentity, CapiSessionOptions, CloudSessionOptions, CustomAgentConfig,
     DefaultAgentConfig, ExtensionInfo, InfiniteSessionConfig, LargeToolOutputConfig,
     McpServerConfig, MemoryConfiguration, NamedProviderConfig, ProviderConfig, ProviderModelConfig,
-    SessionId, SessionLimitsConfig, SystemMessageConfig, Tool,
+    SessionId, SessionLimitsConfig, SystemMessageConfig, Tool, ToolSearchConfig,
 };
 
 /// Wire representation of a slash command (name + description only). The
@@ -123,6 +123,8 @@ pub(crate) struct SessionCreateWire {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub large_output: Option<LargeToolOutputConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_search: Option<ToolSearchConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub disabled_skills: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub custom_agents: Option<Vec<CustomAgentConfig>>,
@@ -170,7 +172,7 @@ pub(crate) struct SessionCreateWire {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub commands: Option<Vec<CommandWireDefinition>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub exp_assignments: Option<serde_json::Value>,
+    pub exp_assignments: Option<crate::types::CopilotExpAssignmentResponse>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enable_managed_settings: Option<bool>,
 }
@@ -257,6 +259,8 @@ pub(crate) struct SessionResumeWire {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub large_output: Option<LargeToolOutputConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_search: Option<ToolSearchConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub disabled_skills: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub custom_agents: Option<Vec<CustomAgentConfig>>,
@@ -307,7 +311,7 @@ pub(crate) struct SessionResumeWire {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub continue_pending_work: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub exp_assignments: Option<serde_json::Value>,
+    pub exp_assignments: Option<crate::types::CopilotExpAssignmentResponse>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enable_managed_settings: Option<bool>,
 }

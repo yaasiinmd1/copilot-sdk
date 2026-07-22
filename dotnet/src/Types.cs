@@ -698,6 +698,12 @@ public sealed class ToolResultObject
     public IDictionary<string, object>? ToolTelemetry { get; set; }
 
     /// <summary>
+    /// Names of tools returned by a tool-search tool.
+    /// </summary>
+    [JsonPropertyName("toolReferences")]
+    public IList<string>? ToolReferences { get; set; }
+
+    /// <summary>
     /// Converts the result of an <see cref="AIFunction"/> invocation into a
     /// <see cref="ToolResultObject"/>. Handles <see cref="ToolResultAIContent"/>,
     /// <see cref="AIContent"/>, and falls back to JSON serialization.
@@ -808,6 +814,14 @@ public sealed class ToolInvocation
     /// Arguments passed to the tool by the language model.
     /// </summary>
     public JsonElement? Arguments { get; set; }
+    /// <summary>
+    /// Snapshot of the session's currently initialized tools. The SDK populates
+    /// this only when the invocation targets the built-in tool-search tool
+    /// (<c>tool_search_tool</c>), so a tool-search override can rank/filter the
+    /// live catalog — including MCP tools configured in settings — without
+    /// issuing its own RPC. <c>null</c> for every other tool invocation.
+    /// </summary>
+    public IList<CurrentToolMetadata>? AvailableTools { get; set; }
 }
 
 /// <summary>
@@ -2643,6 +2657,14 @@ public sealed class CustomAgentConfig
     /// </summary>
     [JsonPropertyName("model")]
     public string? Model { get; set; }
+
+    /// <summary>
+    /// Reasoning effort level for this agent's model.
+    /// When omitted, no per-agent override is sent and the backend chooses its
+    /// default. The parent session effort is not inherited.
+    /// </summary>
+    [JsonPropertyName("reasoningEffort")]
+    public string? ReasoningEffort { get; set; }
 }
 
 /// <summary>
@@ -2722,6 +2744,30 @@ public sealed class LargeToolOutputConfig
 }
 
 /// <summary>
+/// Overrides the runtime's built-in tool-search behavior.
+/// Defers tools to keep the model's active tool set small.
+/// To override the tool-search tool's implementation, register a tool
+/// named "tool_search_tool" with <c>OverridesBuiltInTool</c> set to
+/// <see langword="true"/>.
+/// </summary>
+public sealed class ToolSearchConfig
+{
+    /// <summary>
+    /// Enable or disable tool search.
+    /// </summary>
+    [JsonPropertyName("enabled")]
+    public bool? Enabled { get; set; }
+
+    /// <summary>
+    /// The tool count above which MCP and external tools are deferred behind
+    /// tool search. When <see langword="null"/>, the runtime default (30)
+    /// applies.
+    /// </summary>
+    [JsonPropertyName("deferThreshold")]
+    public int? DeferThreshold { get; set; }
+}
+
+/// <summary>
 /// Configuration for session memory.
 /// </summary>
 public sealed class MemoryConfiguration
@@ -2788,6 +2834,64 @@ public struct SetModelOptions
 }
 
 /// <summary>
+/// A single configuration entry in a <see cref="CopilotExpAssignmentResponse"/>.
+/// Each entry carries an identifier and a bag of typed parameter values.
+/// </summary>
+public sealed class ExpConfigEntry
+{
+    /// <summary>Identifier of the configuration entry.</summary>
+    [JsonPropertyName("Id")]
+    public string Id { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Parameter values keyed by parameter name. Each value is a scalar string,
+    /// number, boolean, or <c>null</c>.
+    /// </summary>
+    [JsonPropertyName("Parameters")]
+    public IDictionary<string, JsonValue?> Parameters { get; set; } = new Dictionary<string, JsonValue?>();
+}
+
+/// <summary>
+/// ExP ("flight") assignment data, in the same JSON shape the Copilot CLI
+/// fetches from the experimentation service. Property names serialize as
+/// PascalCase (<c>Features</c>, <c>Flights</c>, ...) to match the on-the-wire
+/// contract consumed by the runtime.
+/// </summary>
+public sealed class CopilotExpAssignmentResponse
+{
+    /// <summary>Enabled feature names.</summary>
+    [JsonPropertyName("Features")]
+    public IList<string> Features { get; set; } = new List<string>();
+
+    /// <summary>Assigned flights keyed by flight name.</summary>
+    [JsonPropertyName("Flights")]
+    public IDictionary<string, string> Flights { get; set; } = new Dictionary<string, string>();
+
+    /// <summary>Configuration entries carrying typed parameter values.</summary>
+    [JsonPropertyName("Configs")]
+    public IList<ExpConfigEntry> Configs { get; set; } = new List<ExpConfigEntry>();
+
+    /// <summary>Opaque parameter-group payload passed through untouched. Optional.</summary>
+    [JsonPropertyName("ParameterGroups")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public JsonNode? ParameterGroups { get; set; }
+
+    /// <summary>Version of the flighting configuration. Optional.</summary>
+    [JsonPropertyName("FlightingVersion")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? FlightingVersion { get; set; }
+
+    /// <summary>Impression identifier for the assignment. Optional.</summary>
+    [JsonPropertyName("ImpressionId")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? ImpressionId { get; set; }
+
+    /// <summary>Assignment context string forwarded to CAPI and telemetry.</summary>
+    [JsonPropertyName("AssignmentContext")]
+    public string AssignmentContext { get; set; } = string.Empty;
+}
+
+/// <summary>
 /// Shared configuration properties for creating or resuming a Copilot session.
 /// Use <see cref="SessionConfig"/> when creating a new session, or
 /// <see cref="ResumeSessionConfig"/> when resuming an existing one.
@@ -2829,6 +2933,7 @@ public abstract class SessionConfigBase
         Hooks = other.Hooks;
         InfiniteSessions = other.InfiniteSessions;
         LargeOutput = other.LargeOutput;
+        ToolSearch = other.ToolSearch;
         Memory = other.Memory;
         McpServers = other.McpServers is not null
             ? (other.McpServers is Dictionary<string, McpServerConfig> dict
@@ -3236,6 +3341,13 @@ public abstract class SessionConfigBase
     public LargeToolOutputConfig? LargeOutput { get; set; }
 
     /// <summary>
+    /// Overrides the runtime's built-in tool-search behavior.
+    /// Tool search defers tools to keep the model's active tool set small. When <see langword="null"/>,
+    /// the runtime default applies.
+    /// </summary>
+    public ToolSearchConfig? ToolSearch { get; set; }
+
+    /// <summary>
     /// Configuration for session memory. When set, controls whether the
     /// session can read and write persistent memory.
     /// </summary>
@@ -3285,7 +3397,7 @@ public abstract class SessionConfigBase
     /// completion. It is not part of the broadly advertised public surface.
     /// </remarks>
     [EditorBrowsable(EditorBrowsableState.Never)]
-    public JsonElement? ExpAssignments { get; set; }
+    public CopilotExpAssignmentResponse? ExpAssignments { get; set; }
 
     /// <summary>
     /// Opt-in: when <c>true</c>, the runtime self-fetches enterprise managed
@@ -3987,6 +4099,8 @@ public sealed class SystemMessageTransformRpcResponse
 [JsonSerializable(typeof(AutoModeSwitchRequest))]
 [JsonSerializable(typeof(AutoModeSwitchResponse))]
 [JsonSerializable(typeof(CustomAgentConfig))]
+[JsonSerializable(typeof(CopilotExpAssignmentResponse))]
+[JsonSerializable(typeof(ExpConfigEntry))]
 [JsonSerializable(typeof(ExitPlanModeRequest))]
 [JsonSerializable(typeof(ExitPlanModeResult))]
 [JsonSerializable(typeof(GetAuthStatusResponse))]
